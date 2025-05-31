@@ -3,15 +3,30 @@
 #include <WiFiClientSecure.h>
 #include <time.h>
 
-// Configurações
+// =====================
+// Configurações da rede
+// =====================
+
+// Nome da rede Wi-Fi
 const char* ssid = "FELIPE";
+
+// Senha da rede Wi-Fi
 const char* password = "99043425";
+
+// Endereço do broker MQTT (HiveMQ Cloud com TLS)
 const char* mqtt_server = "3a0402e73e714189a5fdf292baf01769.s1.eu.hivemq.cloud";
+
+// Porta segura (TLS) para MQTT
 const int mqtt_port = 8883;
+
+// Credenciais do broker MQTT
 const char* mqtt_user = "jovinull";
 const char* mqtt_password = "Secret123";
 
-// === Certificado ISRG Root X1 (Let's Encrypt) ===
+// ==============================
+// Certificado raiz ISRG Root X1
+// ==============================
+// Necessário para validar a conexão TLS com o HiveMQ Cloud
 const char* root_ca PROGMEM = R"EOF(
 -----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
@@ -46,47 +61,80 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
 
+// ===========================
+// Objetos globais do cliente
+// ===========================
+
+// Cliente WiFi seguro (TLS)
 WiFiClientSecure espClient;
+
+// Cliente MQTT com camada segura
 PubSubClient client(espClient);
 
+/**
+ * Realiza as seguintes etapas:
+ * - Conexão à rede Wi-Fi
+ * - Sincronização do horário via NTP (necessária para TLS)
+ * - Configuração do certificado raiz e conexão com broker MQTT
+ */
 void setupMQTT() {
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+    delay(500); // Exceção ao uso de delay: conexão Wi-Fi
     Serial.print(".");
   }
   Serial.println("\n✅ Wi-Fi conectado!");
 
+  // Sincroniza horário (obrigatório para TLS baseado em data/validação de certificado)
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   time_t now = time(nullptr);
-  while (now < 8 * 3600 * 2) {
+  while (now < 8 * 3600 * 2) { // Espera tempo válido (ex: após 1970)
     delay(500);
     now = time(nullptr);
   }
   Serial.println("🕒 Horário sincronizado");
 
+  // Define o certificado para validação da conexão segura com o broker
   espClient.setCACert(root_ca);
+
+  // Configura o servidor MQTT (TLS)
   client.setServer(mqtt_server, mqtt_port);
 }
 
+/**
+ * Reconecta ao broker MQTT caso a conexão tenha sido perdida.
+ * Tenta novamente a cada 5 segundos com novo clientId.
+ */
 void mqttReconnect() {
   while (!client.connected()) {
-    String clientId = "ESP32Client-" + String(random(0xffff), HEX);
+    String clientId = "ESP32Client-" + String(random(0xffff), HEX); // Evita conflito de ID
+
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
       Serial.println("✅ Conectado ao MQTT");
     } else {
       Serial.print("❌ Falha MQTT: ");
       Serial.println(client.state());
-      delay(5000);
+      delay(5000); // Pequeno delay entre tentativas de reconexão
     }
   }
 }
 
+/**
+ * Deve ser chamada continuamente no loop principal.
+ * - Mantém a conexão ativa com o broker
+ * - Processa as mensagens pendentes (keep-alive)
+ */
 void mqttLoop() {
   if (!client.connected()) mqttReconnect();
   client.loop();
 }
 
+/**
+ * Envia uma mensagem MQTT no tópico especificado.
+ * Pode ser usada por qualquer sensor/módulo.
+ * @param topic Nome do tópico (ex: "ultrassom")
+ * @param payload Mensagem a ser enviada (ex: "23.5")
+ */
 void publishMessage(const char* topic, const char* payload) {
   client.publish(topic, payload);
 }
