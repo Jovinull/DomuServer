@@ -137,21 +137,23 @@ long medirDistanciaCM() {
 void verificarUltrassonico() {
   long dist = medirDistanciaCM();
 
-  if (dist == 0) {
-    Serial.println("📡 Distância: não detectada");
+  // Se a distância for 0 ou negativa, assume falha (sensor desconectado ou erro)
+  if (dist <= 0) {
+    Serial.println("📡 Sensor ultrassônico não detectado");
+    client.publish("ultrassom", "NaN");
     return;
   }
 
   Serial.printf("📏 Distância: %ld cm\n", dist);
 
-  if (dist > 0 && dist < distanciaLimite) {
+  if (dist < distanciaLimite) {
     if (!objetoDetectado) {
       objetoDetectado = true;
       lastUltrasonicTrigger = millis();
     } else if (millis() - lastUltrasonicTrigger >= tempoDeteccao) {
       snprintf(msg, MSG_BUFFER_SIZE, "%ld", dist);
-      client.publish("distancia", msg);
-      Serial.println("✅ Distância publicada após 5s de detecção contínua");
+      client.publish("ultrassom", msg);
+      Serial.println("📤 Publicou distância após detecção contínua");
       objetoDetectado = false;
     }
   } else {
