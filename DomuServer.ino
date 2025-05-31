@@ -3,11 +3,9 @@
 #include <PubSubClient.h>
 #include <DHT.h>
 
-// === WiFi ===
+// ========== CONFIG WIFI/MQTT ==========
 const char* ssid = "FELIPE";
 const char* password = "99043425";
-
-// === HiveMQ Cloud ===
 const char* mqtt_server = "3a0402e73e714189a5fdf292baf01769.s1.eu.hivemq.cloud";
 const int mqtt_port = 8883;
 const char* mqtt_user = "jovinull";
@@ -48,19 +46,30 @@ emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
 )EOF";
 
-// === DHT22 ===
+// ========== PINOS ==========
 #define DHTPIN 4
 #define DHTTYPE DHT22
-DHT dht(DHTPIN, DHTTYPE);
+#define TRIG_PIN 12
+#define ECHO_PIN 13
+#define MQ2_A0 32
+#define MQ2_D0 25
+#define RED_LED 26
+#define GREEN_LED 27
+#define BUZZER 14
 
-// === MQTT ===
+DHT dht(DHTPIN, DHTTYPE);
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
+
 #define MSG_BUFFER_SIZE 50
 char msg[MSG_BUFFER_SIZE];
 
+unsigned long lastUltrasonicTrigger = 0;
+bool objetoDetectado = false;
+const int distanciaLimite = 20; // cm
+const int tempoDeteccao = 5000; // ms
+
 void setup_wifi() {
-  Serial.print("Conectando ao Wi-Fi: ");
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
@@ -69,49 +78,107 @@ void setup_wifi() {
   Serial.println("\n✅ Wi-Fi conectado!");
 
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  Serial.print("⏳ Aguardando horário NTP...");
   time_t now = time(nullptr);
   while (now < 8 * 3600 * 2) {
     delay(500);
     Serial.print(".");
     now = time(nullptr);
   }
-  Serial.println(" OK!");
+  Serial.println("\n🕒 Horário sincronizado via NTP");
 
   espClient.setCACert(root_ca);
 }
 
 void reconnect() {
   while (!client.connected()) {
-    Serial.println("🔌 Tentando conectar ao HiveMQ Cloud...");
     String clientId = "ESP32Client-" + String(random(0xffff), HEX);
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
-      Serial.println("✅ Conectado ao broker HiveMQ com sucesso!");
+      Serial.println("✅ Conectado ao HiveMQ Cloud!");
     } else {
-      Serial.print("❌ Falha, rc=");
+      Serial.print("❌ Falha ao conectar, rc=");
       Serial.print(client.state());
-      Serial.println(" tentando novamente em 5 segundos");
+      Serial.println(". Tentando novamente em 5 segundos...");
       delay(5000);
     }
   }
 }
 
 void enviarDHT() {
-  float umidade = dht.readHumidity();
-  float temperatura = dht.readTemperature();
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
 
-  if (isnan(umidade) || isnan(temperatura)) {
-    Serial.println("❌ Falha na leitura do DHT22.");
+  if (isnan(h)) {
+    Serial.println("💧 Umidade: não detectada");
+    client.publish("umidade", "NaN");
+  } else {
+    Serial.printf("💧 Umidade: %.2f%%\n", h);
+    snprintf(msg, MSG_BUFFER_SIZE, "%.2f", h);
+    client.publish("umidade", msg);
+  }
+
+  if (isnan(t)) {
+    Serial.println("🌡 Temperatura: não detectada");
+    client.publish("temperatura", "NaN");
+  } else {
+    Serial.printf("🌡 Temperatura: %.2f°C\n", t);
+    snprintf(msg, MSG_BUFFER_SIZE, "%.2f", t);
+    client.publish("temperatura", msg);
+  }
+}
+
+long medirDistanciaCM() {
+  digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duracao = pulseIn(ECHO_PIN, HIGH, 20000); // 20ms timeout
+  return duracao * 0.034 / 2;
+}
+
+void verificarUltrassonico() {
+  long dist = medirDistanciaCM();
+
+  if (dist == 0) {
+    Serial.println("📡 Distância: não detectada");
     return;
   }
 
-  Serial.printf("🌡 Temp: %.2f°C | 💧 Umidade: %.2f%%\n", temperatura, umidade);
+  Serial.printf("📏 Distância: %ld cm\n", dist);
 
-  snprintf(msg, MSG_BUFFER_SIZE, "%.2f", temperatura);
-  client.publish("jovino/temperatura", msg);
+  if (dist > 0 && dist < distanciaLimite) {
+    if (!objetoDetectado) {
+      objetoDetectado = true;
+      lastUltrasonicTrigger = millis();
+    } else if (millis() - lastUltrasonicTrigger >= tempoDeteccao) {
+      snprintf(msg, MSG_BUFFER_SIZE, "%ld", dist);
+      client.publish("distancia", msg);
+      Serial.println("✅ Distância publicada após 5s de detecção contínua");
+      objetoDetectado = false;
+    }
+  } else {
+    objetoDetectado = false;
+  }
+}
 
-  snprintf(msg, MSG_BUFFER_SIZE, "%.2f", umidade);
-  client.publish("jovino/umidade", msg);
+void verificarMQ02() {
+  int gasAnalog = analogRead(MQ2_A0);
+  int gasDigital = digitalRead(MQ2_D0);
+
+  Serial.printf("🧪 Gás MQ-02 (A0): %d | Digital: %d\n", gasAnalog, gasDigital);
+  snprintf(msg, MSG_BUFFER_SIZE, "%d", gasAnalog);
+  client.publish("gas", msg);
+
+  if (gasDigital == LOW) {
+    digitalWrite(RED_LED, HIGH);
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(BUZZER, HIGH);
+    client.publish("gas_alerta", "ALTO");
+    Serial.println("⚠️ ALERTA DE GÁS!");
+  } else {
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, HIGH);
+    digitalWrite(BUZZER, LOW);
+    client.publish("gas_alerta", "normal");
+  }
 }
 
 void setup() {
@@ -119,13 +186,22 @@ void setup() {
   dht.begin();
   setup_wifi();
   client.setServer(mqtt_server, mqtt_port);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(MQ2_D0, INPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
 }
 
 void loop() {
-  if (!client.connected()) {
-    reconnect();
-  }
+  if (!client.connected()) reconnect();
   client.loop();
+
   enviarDHT();
+  verificarUltrassonico();
+  verificarMQ02();
+
   delay(1000);
 }
